@@ -82,10 +82,12 @@
     .cam-btns{display:flex;gap:8px;padding:12px 14px}
     .btn-amber{flex:2;padding:13px;background:var(--amber);color:var(--ink);border:none;border-radius:var(--rs);font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
     .btn-ghost{flex:1;padding:13px;background:transparent;border:.5px solid var(--bmed);border-radius:var(--rs);font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text)}
-    .focus-ring{position:absolute;width:60px;height:60px;border:2px solid var(--amber);border-radius:50%;pointer-events:none;transform:translate(-50%,-50%);transition:opacity .4s;box-shadow:0 0 0 1px rgba(0,0,0,0.4)}
-    .focus-ring.show{animation:focusPop .5s ease forwards}
-    @keyframes focusPop{0%{opacity:1;transform:translate(-50%,-50%) scale(1.3)}60%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) scale(1)}}
-    .focus-hint{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:11px;font-weight:600;color:rgba(255,255,255,0.5);pointer-events:none}
+    .sharp-bar-wrap{position:absolute;top:10px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:7px;background:rgba(0,0,0,0.55);border-radius:20px;padding:5px 12px;pointer-events:none;backdrop-filter:blur(4px)}
+    .sharp-label{font-size:11px;font-weight:700;color:#fff;white-space:nowrap}
+    .sharp-track{width:80px;height:6px;background:rgba(255,255,255,0.2);border-radius:3px;overflow:hidden}
+    .sharp-fill{height:100%;border-radius:3px;transition:width .15s,background .15s}
+    .sharp-status{font-size:11px;font-weight:700;white-space:nowrap}
+    .focus-hint{position:absolute;bottom:14px;left:0;right:0;text-align:center;font-size:11px;font-weight:600;color:rgba(255,255,255,0.45);pointer-events:none}
 
     /* OCR RESULT */
     .ocr-bar{padding:12px 14px;background:var(--amber-l);border-bottom:.5px solid var(--border)}
@@ -260,6 +262,7 @@ function renderToast(){
   else if(t) t.remove();
 }
 function stopCamera(){
+  stopSharpnessMeter();
   if(camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream=null; }
 }
 function goScreen(s){ stopCamera(); state.screen=s; render(); }
@@ -311,6 +314,8 @@ function doSearch(){ const e=document.getElementById("main-q"); if(e&&e.value.tr
 function quickSearch(q){ searchCards(q); }
 
 /* ── CAMERA ── */
+var sharpnessRAF = null;
+
 function startCamera(){
   state.screen="camera"; render();
   navigator.mediaDevices.getUserMedia({
@@ -318,7 +323,7 @@ function startCamera(){
   })
   .then(stream=>{
     camStream=stream;
-    // Start with continuous autofocus
+    // Try continuous autofocus
     const track=stream.getVideoTracks()[0];
     const caps=track.getCapabilities?track.getCapabilities():{};
     if(caps.focusMode&&caps.focusMode.includes("continuous")){
@@ -328,61 +333,97 @@ function startCamera(){
       const v=document.getElementById("cam-video");
       if(v){v.srcObject=stream;v.play();}
       positionBox();
-      setupTapToFocus();
+      startSharpnessMeter();
     });
   })
   .catch(()=>{showToast("Camera niet beschikbaar");goScreen("home");});
 }
 
-function setupTapToFocus(){
-  const wrap=document.getElementById("cam-wrap");
-  if(!wrap)return;
-  wrap.addEventListener("click",function(e){
-    if(!camStream)return;
-    const rect=wrap.getBoundingClientRect();
-    const x=(e.clientX-rect.left)/rect.width;
-    const y=(e.clientY-rect.top)/rect.height;
-    // Show focus ring at tap position
-    showFocusRing(e.clientX-rect.left, e.clientY-rect.top);
-    // Apply tap-to-focus via pointOfInterest
-    const track=camStream.getVideoTracks()[0];
-    if(!track)return;
-    const caps=track.getCapabilities?track.getCapabilities():{};
-    const advanced={};
-    if(caps.pointOfInterest) advanced.pointOfInterest={x,y};
-    if(caps.focusMode&&caps.focusMode.includes("manual")) advanced.focusMode="manual";
-    if(Object.keys(advanced).length){
-      track.applyConstraints({advanced:[advanced]})
-        .then(()=>{
-          // After 3s snap back to continuous
-          setTimeout(()=>{
-            if(!camStream)return;
-            const t2=camStream.getVideoTracks()[0];
-            if(t2&&caps.focusMode&&caps.focusMode.includes("continuous")){
-              t2.applyConstraints({advanced:[{focusMode:"continuous"}]}).catch(()=>{});
-            }
-          },3000);
-        })
-        .catch(()=>{});
+function calcSharpness(video){
+  // Sample a 120x80 region from bottom-left (where set number is)
+  const sw=120, sh=80;
+  const offscreen=document.createElement("canvas");
+  offscreen.width=sw; offscreen.height=sh;
+  const ctx=offscreen.getContext("2d");
+  // source: bottom-left 30% wide, 22% tall
+  const srcW=Math.round(video.videoWidth*0.30);
+  const srcH=Math.round(video.videoHeight*0.22);
+  ctx.drawImage(video, 0, video.videoHeight-srcH, srcW, srcH, 0, 0, sw, sh);
+  const data=ctx.getImageData(0,0,sw,sh).data;
+  // Laplacian variance — measures edge sharpness
+  let sum=0, sumSq=0, n=0;
+  for(let y=1;y<sh-1;y++){
+    for(let x=1;x<sw-1;x++){
+      const idx=(y*sw+x)*4;
+      // grayscale
+      const c=0.299*data[idx]+0.587*data[idx+1]+0.114*data[idx+2];
+      const t=0.299*data[((y-1)*sw+x)*4]+0.587*data[((y-1)*sw+x)*4+1]+0.114*data[((y-1)*sw+x)*4+2];
+      const b=0.299*data[((y+1)*sw+x)*4]+0.587*data[((y+1)*sw+x)*4+1]+0.114*data[((y+1)*sw+x)*4+2];
+      const l=0.299*data[(y*sw+x-1)*4]+0.587*data[(y*sw+x-1)*4+1]+0.114*data[(y*sw+x-1)*4+2];
+      const r=0.299*data[(y*sw+x+1)*4]+0.587*data[(y*sw+x+1)*4+1]+0.114*data[(y*sw+x+1)*4+2];
+      const lap=Math.abs(4*c-t-b-l-r);
+      sum+=lap; sumSq+=lap*lap; n++;
     }
-  });
+  }
+  const mean=sum/n;
+  const variance=sumSq/n - mean*mean;
+  return variance;
 }
 
-function showFocusRing(px,py){
-  let ring=document.getElementById("focus-ring");
-  if(!ring){
-    ring=document.createElement("div");
-    ring.id="focus-ring";
-    ring.className="focus-ring";
-    const wrap=document.getElementById("cam-wrap");
-    if(wrap)wrap.appendChild(ring);
+function startSharpnessMeter(){
+  if(sharpnessRAF) cancelAnimationFrame(sharpnessRAF);
+  var samples=[];
+  var sharpFrames=0;
+  var autoSnapEnabled=true;
+  const SHARP_THRESHOLD=65;
+  const SHARP_FRAMES_NEEDED=8; // ~8 frames (~130ms) of sharpness before auto-snap
+
+  function tick(){
+    const v=document.getElementById("cam-video");
+    const fill=document.getElementById("sharp-fill");
+    const status=document.getElementById("sharp-status");
+    if(!v||!fill||!camStream){sharpnessRAF=null;return;}
+    if(v.readyState>=2){
+      try{
+        const score=calcSharpness(v);
+        samples.push(score);
+        if(samples.length>6) samples.shift();
+        const avg=samples.reduce((a,b)=>a+b,0)/samples.length;
+        const pct=Math.min(100, Math.round(avg/2.5));
+        fill.style.width=pct+"%";
+        if(pct<35){
+          fill.style.background="#EF4444";
+          status.textContent="Wazig";
+          status.style.color="#FCA5A5";
+          sharpFrames=0;
+        } else if(pct<SHARP_THRESHOLD){
+          fill.style.background="#F59E0B";
+          status.textContent="Matig";
+          status.style.color="#FDE68A";
+          sharpFrames=0;
+        } else {
+          fill.style.background="#10B981";
+          sharpFrames++;
+          // countdown feedback
+          const remaining=Math.max(0, SHARP_FRAMES_NEEDED-sharpFrames);
+          status.textContent= remaining>0 ? "Scherp…" : "Scherp ✓";
+          status.style.color="#6EE7B7";
+          // auto snap after sustained sharpness
+          if(autoSnapEnabled && sharpFrames>=SHARP_FRAMES_NEEDED){
+            autoSnapEnabled=false;
+            snapAndOCR();
+            return;
+          }
+        }
+      } catch(e){}
+    }
+    sharpnessRAF=requestAnimationFrame(tick);
   }
-  ring.style.left=px+"px";
-  ring.style.top=py+"px";
-  ring.className="focus-ring";
-  // Force reflow to restart animation
-  void ring.offsetWidth;
-  ring.className="focus-ring show";
+  tick();
+}
+
+function stopSharpnessMeter(){
+  if(sharpnessRAF){ cancelAnimationFrame(sharpnessRAF); sharpnessRAF=null; }
 }
 
 function positionBox(){
@@ -400,6 +441,7 @@ function positionBox(){
 }
 
 function snapAndOCR(){
+  stopSharpnessMeter();
   const video=document.getElementById("cam-video");
   const canvas=document.getElementById("cam-canvas");
   if(!video||!canvas)return;
@@ -527,14 +569,19 @@ function renderHome(){
 function renderCamera(){
   return`
     <div class="surface">
-      <div class="cam-live" id="cam-wrap" style="height:280px;cursor:crosshair">
+      <div class="cam-live" id="cam-wrap" style="height:280px">
         <video id="cam-video" autoplay playsinline muted></video>
         <canvas id="cam-canvas"></canvas>
+        <div class="sharp-bar-wrap">
+          <span class="sharp-label">Scherpte</span>
+          <div class="sharp-track"><div class="sharp-fill" id="sharp-fill" style="width:0%;background:#EF4444"></div></div>
+          <span class="sharp-status" id="sharp-status" style="color:#FCA5A5">Wazig</span>
+        </div>
         <div class="cam-box" id="cam-box">
           <div class="scanline"></div>
           <div class="cam-box-lbl">setnummer · linksonder</div>
         </div>
-        <div class="focus-hint">Tik ergens om scherp te stellen</div>
+        <div class="focus-hint">Houd kaart stil — foto wordt automatisch gemaakt</div>
       </div>
       <div class="cam-btns">
         <button class="btn-ghost" onclick="goScreen('home')">Annuleer</button>
