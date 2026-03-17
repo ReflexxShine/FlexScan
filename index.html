@@ -272,22 +272,58 @@ function setQty(n){
   state.qty=Math.max(1,Math.min(99,n));
   const v=document.getElementById("qty-val");if(v)v.textContent=state.qty;
 }
+function parseQuery(q){
+  // "BRS 45" or "BRS45" or "brs045" → setCode + number
+  const codeNum=q.match(/^([A-Za-z]{2,8})\s*(\d{1,4}[a-z]?)$/i);
+  if(codeNum)return{type:"codenumber",setCode:codeNum[1].toUpperCase(),number:codeNum[2].replace(/^0+/,"")};
+  // "45/172" or "45/264" → number only
+  const slash=q.match(/^(\d{1,4}[a-z]?)\/\d+$/i);
+  if(slash)return{type:"number",number:slash[1].replace(/^0+/,"")};
+  // pure number "045" or "45"
+  const pureNum=q.match(/^(\d{1,4}[a-z]?)$/i);
+  if(pureNum)return{type:"number",number:pureNum[1].replace(/^0+/,"")};
+  return{type:"name"};
+}
+
+async function fetchAPI(query){
+  const r=await fetch(`${API}/cards?${query}&pageSize=40&orderBy=-set.releaseDate`);
+  const d=await r.json();
+  return(d.data||[]).filter(c=>c.images?.small);
+}
+
 async function searchCards(q){
   if(!q||!q.trim())return;
   q=q.trim();
   state.screen="scanning";state.loading=true;render();saveHist(q);
   try{
-    const r=await fetch(`${API}/cards?q=name:"${encodeURIComponent(q)}"&pageSize=30&orderBy=-set.releaseDate`);
-    const d=await r.json();
-    let res=(d.data||[]).filter(c=>c.images?.small);
-    if(!res.length){
-      const r2=await fetch(`${API}/cards?q=name:${encodeURIComponent(q+"*")}&pageSize=30&orderBy=-set.releaseDate`);
-      const d2=await r2.json();
-      res=(d2.data||[]).filter(c=>c.images?.small);
+    let res=[];
+    const parsed=parseQuery(q);
+
+    if(parsed.type==="codenumber"){
+      const sc=parsed.setCode;
+      const num=parsed.number;
+      // 1. Try exact: ptcgoCode (PTCGO/PTCGL codes like BRS, SIT, CRZ)
+      res=await fetchAPI(`q=set.ptcgoCode:${sc}%20number:${num}`);
+      // 2. Try set.id (like "brs", "sit")
+      if(!res.length)res=await fetchAPI(`q=set.id:${sc.toLowerCase()}%20number:${num}`);
+      // 3. Try just the number across all sets, filter client-side
+      if(!res.length){
+        const all=await fetchAPI(`q=number:${num}`);
+        // prioritize sets whose ptcgoCode or id matches
+        const match=all.filter(c=>c.set?.ptcgoCode?.toUpperCase()===sc||c.set?.id?.toUpperCase()===sc.toLowerCase());
+        res=match.length?match:all;
+      }
+    } else if(parsed.type==="number"){
+      res=await fetchAPI(`q=number:${parsed.number}`);
+    } else {
+      // Name search: exact first, wildcard fallback
+      res=await fetchAPI(`q=name:"${encodeURIComponent(q)}"`);
+      if(!res.length)res=await fetchAPI(`q=name:${encodeURIComponent(q+"*")}`);
     }
+
     if(res.length){state.cards=res;state.active=res[0];state.qty=1;state.thumbScrollLeft=0;state.screen="results";}
     else{showToast(`Niets gevonden voor "${q}"`);state.screen="home";}
-  }catch{showToast("Verbindingsfout — probeer opnieuw");state.screen="home";}
+  }catch(e){console.error(e);showToast("Verbindingsfout — probeer opnieuw");state.screen="home";}
   state.loading=false;render();
 }
 function selectThumb(id){
@@ -321,7 +357,7 @@ function renderHome(){
     <div class="hero">
       <div class="hero-label">Pokémon kaart opzoeken</div>
       <div class="hero-search">
-        <input type="text" id="main-q" placeholder="Charizard, Pikachu, Mewtwo..." autocomplete="off" autocorrect="off" spellcheck="false"
+        <input type="text" id="main-q" placeholder="Charizard, Pikachu of bijv. WHT158..." autocomplete="off" autocorrect="off" spellcheck="false"
           onkeydown="if(event.key==='Enter')doSearch()" />
         <button class="hero-sbtn" onclick="doSearch()">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="6.5" cy="6.5" r="4.5" stroke="white" stroke-width="2"/><line x1="10.2" y1="10.2" x2="14" y2="14" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>
@@ -402,6 +438,7 @@ function renderDetail(){
 }
 
 function renderResults(){
+  const byCode=state.searchWasByCode&&state.cards.length>1;
   return`
     <button class="back-btn" onclick="goScreen('home')">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M9 2L4 7l5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -410,9 +447,13 @@ function renderResults(){
     ${renderDetail()}
     ${state.cards.length>1?`
     <div class="surface sp">
-      <div style="font-size:11px;font-weight:700;color:var(--hint);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">${state.cards.length} versies — tik om te wisselen</div>
+      <div style="font-size:11px;font-weight:700;color:var(--hint);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">${state.cards.length} sets gevonden — tik om te wisselen</div>
       <div class="thumbs" id="thumbs-row">
-        ${state.cards.map(c=>`<img class="timg ${state.active.id===c.id?"active":""}" src="${c.images.small}" loading="lazy" onclick="selectThumb('${c.id}')" />`).join("")}
+        ${state.cards.map(c=>`
+          <div style="flex-shrink:0;text-align:center;cursor:pointer" onclick="selectThumb('${c.id}')">
+            <img class="timg ${state.active.id===c.id?"active":""}" src="${c.images.small}" loading="lazy" style="display:block" />
+            ${byCode?`<div style="font-size:9px;font-weight:600;color:var(--hint);margin-top:3px;width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.set?.abbreviation||c.set?.id||""}</div>`:""}
+          </div>`).join("")}
       </div>
     </div>`:""}`;
 }
