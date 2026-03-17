@@ -340,34 +340,37 @@ function startCamera(){
 }
 
 function calcSharpness(video){
-  // Sample a 120x80 region from bottom-left (where set number is)
-  const sw=120, sh=80;
+  // Crop EXACTLY the box region (bottom-left, same as golden frame)
+  const srcW=Math.round(video.videoWidth  * boxRegion.wPct);
+  const srcH=Math.round(video.videoHeight * 0.176); // matches bw*0.55 / camHeight
+  const srcX=0;
+  const srcY=video.videoHeight - srcH;
+
+  // Render into small canvas (120x66) for speed
+  const sw=120, sh=Math.round(sw*(srcH/srcW));
   const offscreen=document.createElement("canvas");
   offscreen.width=sw; offscreen.height=sh;
   const ctx=offscreen.getContext("2d");
-  // source: bottom-left 30% wide, 22% tall
-  const srcW=Math.round(video.videoWidth*0.30);
-  const srcH=Math.round(video.videoHeight*0.22);
-  ctx.drawImage(video, 0, video.videoHeight-srcH, srcW, srcH, 0, 0, sw, sh);
+  ctx.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, sw, sh);
+
   const data=ctx.getImageData(0,0,sw,sh).data;
-  // Laplacian variance — measures edge sharpness
+  // Laplacian variance — high = sharp edges = sharp text
   let sum=0, sumSq=0, n=0;
   for(let y=1;y<sh-1;y++){
     for(let x=1;x<sw-1;x++){
-      const idx=(y*sw+x)*4;
-      // grayscale
-      const c=0.299*data[idx]+0.587*data[idx+1]+0.114*data[idx+2];
-      const t=0.299*data[((y-1)*sw+x)*4]+0.587*data[((y-1)*sw+x)*4+1]+0.114*data[((y-1)*sw+x)*4+2];
-      const b=0.299*data[((y+1)*sw+x)*4]+0.587*data[((y+1)*sw+x)*4+1]+0.114*data[((y+1)*sw+x)*4+2];
-      const l=0.299*data[(y*sw+x-1)*4]+0.587*data[(y*sw+x-1)*4+1]+0.114*data[(y*sw+x-1)*4+2];
-      const r=0.299*data[(y*sw+x+1)*4]+0.587*data[(y*sw+x+1)*4+1]+0.114*data[(y*sw+x+1)*4+2];
+      const i=(y*sw+x)*4;
+      const gray=p=>0.299*data[p]+0.587*data[p+1]+0.114*data[p+2];
+      const c=gray(i);
+      const t=gray(((y-1)*sw+x)*4);
+      const b=gray(((y+1)*sw+x)*4);
+      const l=gray((y*sw+x-1)*4);
+      const r=gray((y*sw+x+1)*4);
       const lap=Math.abs(4*c-t-b-l-r);
       sum+=lap; sumSq+=lap*lap; n++;
     }
   }
   const mean=sum/n;
-  const variance=sumSq/n - mean*mean;
-  return variance;
+  return sumSq/n - mean*mean; // variance
 }
 
 function startSharpnessMeter(){
@@ -426,6 +429,9 @@ function stopSharpnessMeter(){
   if(sharpnessRAF){ cancelAnimationFrame(sharpnessRAF); sharpnessRAF=null; }
 }
 
+// Shared box region — used by both positionBox and calcSharpness
+var boxRegion = {xPct:0, yPct:0, wPct:0.32, hPct:0.176}; // bottom-left
+
 function positionBox(){
   const wrap=document.getElementById("cam-wrap");
   const box=document.getElementById("cam-box");
@@ -438,6 +444,9 @@ function positionBox(){
   box.style.height=bh+"px";
   box.style.left="14px";
   box.style.bottom="14px";
+  // store as fraction of video frame
+  boxRegion.wPct=0.32;
+  boxRegion.hPct=bh/h * (h/wrap.offsetHeight); // ~0.176 but exact
 }
 
 function snapAndOCR(){
