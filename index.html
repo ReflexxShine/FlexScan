@@ -13,6 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
   <style>
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     :root{
@@ -200,6 +201,29 @@
     /* ── TOAST ── */
     .toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--ink);color:#fff;padding:11px 20px;border-radius:22px;font-size:13px;font-weight:600;z-index:100;white-space:nowrap;animation:tin .18s ease;box-shadow:0 4px 20px rgba(0,0,0,.25)}
     @keyframes tin{from{opacity:0;transform:translateX(-50%) translateY(8px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+
+    /* ── CAMERA ── */
+    .cam-wrap{position:relative;width:100%;background:#000;overflow:hidden;border-radius:var(--r) var(--r) 0 0}
+    #cam-video{width:100%;height:100%;object-fit:cover;display:block}
+    #cam-canvas{display:none}
+    .cam-overlay{position:absolute;inset:0;pointer-events:none}
+    /* dark mask with cutout at bottom-left */
+    .cam-mask-top{position:absolute;top:0;left:0;right:0;background:rgba(0,0,0,0.55)}
+    .cam-mask-right{position:absolute;bottom:0;right:0;background:rgba(0,0,0,0.55)}
+    /* highlight box bottom-left */
+    .cam-box{position:absolute;bottom:14px;left:14px;border:2.5px solid var(--amber);border-radius:6px}
+    .cam-box-label{position:absolute;bottom:-22px;left:0;font-size:10px;font-weight:700;color:var(--amber);white-space:nowrap;letter-spacing:.3px}
+    /* scan animation line inside box */
+    .cam-scanline{position:absolute;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--amber),transparent);animation:camScan 1.6s ease-in-out infinite}
+    @keyframes camScan{0%,100%{top:4px;opacity:.4}50%{top:calc(100% - 6px);opacity:1}}
+    .cam-btn-row{display:flex;gap:8px;padding:14px}
+    .cam-snap{flex:2;padding:13px;background:var(--amber);color:var(--ink);border:none;border-radius:var(--rs);font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+    .cam-cancel{flex:1;padding:13px;background:transparent;border:.5px solid var(--bmed);border-radius:var(--rs);font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text)}
+    .ocr-preview-img{width:100%;max-height:180px;object-fit:contain;background:#000;display:block}
+    .ocr-found-bar{padding:12px 14px;background:var(--amber-l);border-bottom:.5px solid var(--border)}
+    .ocr-found-label{font-size:11px;font-weight:700;color:var(--amber-d);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px}
+    .ocr-input{width:100%;padding:11px 14px;border:.5px solid var(--bmed);border-radius:var(--rs);background:var(--card);color:var(--text);font-size:16px;font-weight:600;outline:none;font-family:inherit}
+    .ocr-input:focus{border-color:var(--amber)}
   </style>
 </head>
 <body>
@@ -267,7 +291,7 @@ function renderToast(){
   if(state.toast){if(!t){t=document.createElement("div");t.id="toast-el";t.className="toast";document.body.appendChild(t);}t.textContent=state.toast;}
   else if(t)t.remove();
 }
-function goScreen(s){state.screen=s;render()}
+function goScreen(s){stopCamera();state.screen=s;render()}
 function setQty(n){
   state.qty=Math.max(1,Math.min(99,n));
   const v=document.getElementById("qty-val");if(v)v.textContent=state.qty;
@@ -369,11 +393,11 @@ function renderHome(){
       <div class="hist-lbl">Recent gezocht</div>
       <div class="chips">${state.history.map(h=>`<button class="chip" onclick="quickSearch('${h.replace(/\\/g,"\\\\").replace(/'/g,"\\'")}')">⏱ ${h}</button>`).join("")}</div>
     </div>`:""}
-    <div class="soon">
+    <button class="surface" style="width:100%;border:none;cursor:pointer;display:flex;align-items:center;gap:12px;padding:13px 15px;text-align:left;font-family:inherit" onclick="startCamera()">
       <div class="soon-ic">📷</div>
-      <div style="flex:1"><div class="soon-title">Kaart scannen</div><div class="soon-sub">Camera-functie komt binnenkort</div></div>
-      <div class="coming-pill">Binnenkort</div>
-    </div>
+      <div style="flex:1"><div class="soon-title">Kaart scannen</div><div class="soon-sub">Scan setnummer linksonder op de kaart</div></div>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 3l5 5-5 5" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
     ${state.collection.length>0?`
     <div class="sec-hd">Mijn collectie</div>
     <div class="metrics">
@@ -494,15 +518,155 @@ function renderCollection(){
       </div>`).join("")}`;
 }
 
+
+var camStream = null;
+
+function startCamera(){
+  state.screen="camera"; render();
+  navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1280},height:{ideal:720}}})
+    .then(stream=>{
+      camStream=stream;
+      requestAnimationFrame(()=>{
+        const v=document.getElementById("cam-video");
+        if(v){v.srcObject=stream;v.play();}
+        sizeCameraBox();
+      });
+    })
+    .catch(()=>{showToast("Camera niet beschikbaar");state.screen="home";render();});
+}
+
+function sizeCameraBox(){
+  const wrap=document.getElementById("cam-wrap");
+  const box=document.getElementById("cam-box");
+  const maskTop=document.getElementById("cam-mask-top");
+  const maskRight=document.getElementById("cam-mask-right");
+  if(!wrap||!box)return;
+  const w=wrap.offsetWidth;
+  const h=wrap.offsetHeight;
+  // card proportions ~5:7, box = 30% wide, 18% tall in bottom-left
+  const bw=Math.round(w*0.30);
+  const bh=Math.round(bw*0.6);
+  const bx=14; const by=h-bh-36;
+  box.style.width=bw+"px";
+  box.style.height=bh+"px";
+  box.style.left=bx+"px";
+  box.style.bottom="36px";
+  if(maskTop){maskTop.style.height=by+"px";}
+  if(maskRight){maskRight.style.width=(w-bx-bw-4)+"px";maskRight.style.height=bh+"px";maskRight.style.bottom="36px";}
+}
+
+function stopCamera(){
+  if(camStream){camStream.getTracks().forEach(t=>t.stop());camStream=null;}
+}
+
+function snapAndOCR(){
+  const video=document.getElementById("cam-video");
+  const canvas=document.getElementById("cam-canvas");
+  if(!video||!canvas)return;
+
+  // Full frame
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  canvas.getContext("2d").drawImage(video,0,0);
+
+  // Crop bottom-left ~30% wide, ~18% tall — where set+number lives
+  const cw=Math.round(canvas.width*0.32);
+  const ch=Math.round(canvas.height*0.20);
+  const cx=0;
+  const cy=canvas.height-ch;
+
+  const crop=document.createElement("canvas");
+  crop.width=cw*3; crop.height=ch*3; // upscale 3x for OCR
+  const ctx=crop.getContext("2d");
+  ctx.imageSmoothingEnabled=true;
+  ctx.imageSmoothingQuality="high";
+  // boost contrast
+  ctx.filter="contrast(2.2) brightness(1.15) grayscale(1)";
+  ctx.drawImage(canvas,cx,cy,cw,ch,0,0,crop.width,crop.height);
+
+  state.capturedImage=canvas.toDataURL("image/jpeg",0.85);
+  state.ocrResult="";
+  stopCamera();
+  state.screen="ocrresult";
+  render();
+
+  // OCR on cropped region — only letters + numbers + slash
+  Tesseract.recognize(crop.toDataURL("image/png"),"eng",{
+    logger:()=>{},
+    tessedit_char_whitelist:"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/ ",
+    tessedit_pageseg_mode:"7"
+  }).then(r=>{
+    const raw=(r.data.text||"").trim().replace(/[^A-Za-z0-9\/\s]/g,"").replace(/\s+/g," ").trim();
+    // extract pattern like "BRS 045" or "045/172" or "BRS045"
+    const codeNum=raw.match(/([A-Za-z]{2,6})\s*(\d{1,4}[a-z]?)/i);
+    const slashNum=raw.match(/(\d{1,4}[a-z]?)\/\d+/i);
+    if(codeNum) state.ocrResult=codeNum[1].toUpperCase()+" "+codeNum[2];
+    else if(slashNum) state.ocrResult=slashNum[0];
+    else state.ocrResult=raw.slice(0,20);
+    const inp=document.getElementById("ocr-inp");
+    if(inp){inp.value=state.ocrResult;inp.focus();inp.select();}
+  }).catch(()=>{
+    const inp=document.getElementById("ocr-inp");
+    if(inp)inp.focus();
+  });
+}
+
+function doOcrSearch(){
+  const inp=document.getElementById("ocr-inp");
+  const q=(inp?inp.value:state.ocrResult||"").trim();
+  if(!q){if(inp)inp.focus();return;}
+  searchCards(q);
+}
+
+function renderCamera(){
+  return`<div class="surface" style="margin-bottom:12px">
+    <div class="cam-wrap" id="cam-wrap" style="height:260px">
+      <video id="cam-video" autoplay playsinline muted></video>
+      <canvas id="cam-canvas"></canvas>
+      <div class="cam-overlay">
+        <div class="cam-mask-top" id="cam-mask-top"></div>
+        <div class="cam-mask-right" id="cam-mask-right"></div>
+        <div class="cam-box" id="cam-box">
+          <div class="cam-scanline"></div>
+          <div class="cam-box-label">set · nummer</div>
+        </div>
+      </div>
+    </div>
+    <div class="cam-btn-row">
+      <button class="cam-cancel" onclick="stopCamera();goScreen(\'home\')">Annuleer</button>
+      <button class="cam-snap" onclick="snapAndOCR()">📸 Foto maken</button>
+    </div>
+  </div>`;
+}
+
+function renderOcrResult(){
+  return`<div class="surface" style="margin-bottom:12px">
+    ${state.capturedImage?`<img class="ocr-preview-img" src="${state.capturedImage}" />`:""}
+    <div class="ocr-found-bar">
+      <div class="ocr-found-label">${state.ocrResult?"Herkend — controleer en zoek:":"Niet herkend — typ het setnummer:"}</div>
+      <input class="ocr-input" id="ocr-inp" type="text" value="${state.ocrResult||""}"
+        placeholder="Bijv. BRS 045 of 045/172"
+        oninput="state.ocrResult=this.value"
+        onkeydown="if(event.key===\'Enter\')doOcrSearch()" />
+    </div>
+    <div class="cam-btn-row">
+      <button class="cam-cancel" onclick="goScreen(\'camera\')">↩ Opnieuw</button>
+      <button class="cam-snap" onclick="doOcrSearch()">🔍 Zoeken</button>
+    </div>
+  </div>`;
+}
+
 function render(){
   const body=document.getElementById("body");
-  const onScan=["home","scanning","results"].includes(state.screen);
+  const onScan=["home","camera","ocrresult","scanning","results"].includes(state.screen);
   document.getElementById("tab-scan").className="hpill"+(onScan?" active":"");
   document.getElementById("tab-coll").className="hpill"+(state.screen==="collection"?" active":"");
   const tc=state.collection.reduce((s,c)=>s+(c.qty||1),0);
   const cn=document.getElementById("coll-count");
   if(tc>0){cn.textContent=tc;cn.style.display="inline-block";}else{cn.style.display="none";}
   if(state.screen==="home")body.innerHTML=renderHome();
+  else if(state.screen==="camera"){body.innerHTML=renderCamera();requestAnimationFrame(sizeCameraBox);}
+  else if(state.screen==="ocrresult")body.innerHTML=renderOcrResult();
   else if(state.screen==="scanning")body.innerHTML=renderScanning();
   else if(state.screen==="results")body.innerHTML=renderResults();
   else if(state.screen==="collection")body.innerHTML=renderCollection();
