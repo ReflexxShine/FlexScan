@@ -82,6 +82,10 @@
     .cam-btns{display:flex;gap:8px;padding:12px 14px}
     .btn-amber{flex:2;padding:13px;background:var(--amber);color:var(--ink);border:none;border-radius:var(--rs);font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
     .btn-ghost{flex:1;padding:13px;background:transparent;border:.5px solid var(--bmed);border-radius:var(--rs);font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;color:var(--text)}
+    .flash-btn{width:44px;height:44px;border-radius:50%;border:.5px solid var(--bmed);background:transparent;cursor:pointer;font-size:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s}
+    .flash-btn.on{background:var(--amber);border-color:var(--amber)}
+    .cam-top-bar{position:absolute;top:10px;right:10px;z-index:10;display:flex;gap:8px}
+    .focus-hint{position:absolute;bottom:70px;left:0;right:0;text-align:center;font-size:11px;font-weight:600;color:rgba(255,255,255,0.6);pointer-events:none}
 
     /* OCR RESULT */
     .ocr-bar{padding:12px 14px;background:var(--amber-l);border-bottom:.5px solid var(--border)}
@@ -307,18 +311,54 @@ function doSearch(){ const e=document.getElementById("main-q"); if(e&&e.value.tr
 function quickSearch(q){ searchCards(q); }
 
 /* ── CAMERA ── */
+var flashOn = false;
+
 function startCamera(){
+  flashOn = false;
   state.screen="camera"; render();
-  navigator.mediaDevices.getUserMedia({video:{facingMode:"environment",width:{ideal:1280},height:{ideal:720}}})
-    .then(stream=>{
-      camStream=stream;
-      requestAnimationFrame(()=>{
-        const v=document.getElementById("cam-video");
-        if(v){ v.srcObject=stream; v.play(); }
-        positionBox();
-      });
+  navigator.mediaDevices.getUserMedia({
+    video:{
+      facingMode:"environment",
+      width:{ideal:1920},
+      height:{ideal:1080},
+      focusMode:"continuous",
+      advanced:[{focusMode:"continuous"}]
+    }
+  })
+  .then(stream=>{
+    camStream=stream;
+    // Apply advanced constraints for autofocus
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    const constraints = {};
+    if(caps.focusMode && caps.focusMode.includes("continuous")){
+      constraints.focusMode = "continuous";
+    }
+    if(Object.keys(constraints).length){
+      track.applyConstraints({advanced:[constraints]}).catch(()=>{});
+    }
+    requestAnimationFrame(()=>{
+      const v=document.getElementById("cam-video");
+      if(v){ v.srcObject=stream; v.play(); }
+      positionBox();
+    });
+  })
+  .catch(()=>{ showToast("Camera niet beschikbaar"); goScreen("home"); });
+}
+
+function toggleFlash(){
+  if(!camStream)return;
+  const track=camStream.getVideoTracks()[0];
+  if(!track)return;
+  const caps=track.getCapabilities?track.getCapabilities():{};
+  if(!caps.torch){ showToast("Flits niet beschikbaar op dit apparaat"); return; }
+  flashOn=!flashOn;
+  track.applyConstraints({advanced:[{torch:flashOn}]})
+    .then(()=>{
+      const btn=document.getElementById("flash-btn");
+      if(btn){ btn.className="flash-btn"+(flashOn?" on":""); btn.textContent=flashOn?"⚡":"🔦"; }
     })
-    .catch(()=>{ showToast("Camera niet beschikbaar"); goScreen("home"); });
+    .catch(()=>{ showToast("Flits kon niet worden ingeschakeld"); flashOn=false; });
 }
 
 function positionBox(){
@@ -466,10 +506,14 @@ function renderCamera(){
       <div class="cam-live" id="cam-wrap" style="height:280px">
         <video id="cam-video" autoplay playsinline muted></video>
         <canvas id="cam-canvas"></canvas>
+        <div class="cam-top-bar">
+          <button class="flash-btn" id="flash-btn" onclick="toggleFlash()" title="Flits aan/uit">🔦</button>
+        </div>
         <div class="cam-box" id="cam-box">
           <div class="scanline"></div>
           <div class="cam-box-lbl">setnummer · linksonder</div>
         </div>
+        <div class="focus-hint">Houd stil voor scherp beeld</div>
       </div>
       <div class="cam-btns">
         <button class="btn-ghost" onclick="goScreen('home')">Annuleer</button>
